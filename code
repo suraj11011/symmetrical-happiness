@@ -1,0 +1,194 @@
+# Water Quality Monitoring System
+# Author: Suraj Nair
+# Description: GUI-based real-time water quality monitoring system using Arduino and Python
+
+import tkinter as tk
+from tkinter import ttk
+import webbrowser
+import serial
+import time
+import json
+import csv
+import os
+import datetime
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from PIL import Image, ImageTk
+
+# Constants
+CSV_FILE = "sensor_data.csv"
+
+# Establish serial connection
+try:
+    ser = serial.Serial("COM3", 115200, timeout=1)
+    time.sleep(2)
+except:
+    print("Error: Could not connect to Arduino.")
+    ser = None
+
+# Fetch data from Arduino
+def get_sensor_data():
+    if ser:
+        ser.write(b'GET_DATA\n')
+        line = ser.readline().decode().strip()
+        return line
+    return None
+
+# Save received data to CSV file
+def save_data_to_csv(sensor_name, value, latitude, longitude):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data = [timestamp, sensor_name, value, latitude, longitude]
+
+    file_exists = os.path.exists(CSV_FILE)
+    with open(CSV_FILE, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["Timestamp", "Sensor", "Value", "Latitude", "Longitude"])
+        writer.writerow(data)
+
+    clean_old_data()
+
+# Clean data older than 7 days
+def clean_old_data():
+    if not os.path.exists(CSV_FILE):
+        return
+
+    cutoff_date = datetime.datetime.now() - datetime.timedelta(days=7)
+    new_data = []
+
+    with open(CSV_FILE, "r") as file:
+        reader = csv.reader(file)
+        header = next(reader)
+        for row in reader:
+            row_date = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+            if row_date >= cutoff_date:
+                new_data.append(row)
+
+    with open(CSV_FILE, "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(header)
+        writer.writerows(new_data)
+
+# Predict next sensor value using linear regression
+def predict_next_value(sensor_name):
+    if not os.path.exists(CSV_FILE):
+        return "No Data"
+
+    df = pd.read_csv(CSV_FILE)
+    df = df[df["Sensor"] == sensor_name]
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+    df["Time"] = (df["Timestamp"] - df["Timestamp"].min()).dt.total_seconds()
+
+    if len(df) < 3:
+        return "Not enough data"
+
+    model = LinearRegression()
+    X = df["Time"].values.reshape(-1, 1)
+    y = df["Value"].astype(float).values
+    model.fit(X, y)
+
+    next_time = df["Time"].max() + 2592000  # Predict 30 days ahead
+    prediction = model.predict([[next_time]])[0]
+    return round(prediction, 2)
+
+# Update GUI with sensor data
+def update_display():
+    raw_data = get_sensor_data()
+    selected_sensor = sensor_var.get()
+
+    if raw_data:
+        try:
+            data_dict = json.loads(raw_data)
+            if selected_sensor in data_dict:
+                sensor_value.set(f"{selected_sensor}: {data_dict[selected_sensor]}")
+                save_data_to_csv(selected_sensor, data_dict[selected_sensor], data_dict.get("Latitude", 0), data_dict.get("Longitude", 0))
+
+            if 'Latitude' in data_dict and 'Longitude' in data_dict:
+                lat.set(float(data_dict['Latitude']))
+                lon.set(float(data_dict['Longitude']))
+                gps_label.config(text=f"Lat: {lat.get()}, Lon: {lon.get()}")
+
+            predicted_value = predict_next_value(selected_sensor)
+            prediction_value.set(f"Predicted: {predicted_value}")
+
+        except Exception as e:
+            sensor_value.set("Error Reading Data")
+            print(f"Error parsing data: {e}")
+    else:
+        sensor_value.set("No Data Received")
+
+    root.after(2000, update_display)
+
+# Open GPS location in browser
+def open_map():
+    latitude = lat.get()
+    longitude = lon.get()
+    if latitude and longitude:
+        url = f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
+        webbrowser.open(url)
+
+# Show 7-day history in new window
+def show_history():
+    history_window = tk.Toplevel(root)
+    history_window.title("Last 7 Days Sensor Data")
+    history_window.geometry("600x400")
+
+    tree = ttk.Treeview(history_window, columns=("Timestamp", "Sensor", "Value", "Latitude", "Longitude"), show="headings")
+    for col in tree["columns"]:
+        tree.heading(col, text=col)
+        tree.column(col, width=100)
+    tree.column("Timestamp", width=150)
+    tree.pack(fill="both", expand=True)
+
+    if os.path.exists(CSV_FILE):
+        with open(CSV_FILE, "r") as file:
+            reader = csv.reader(file)
+            next(reader)
+            for row in reader:
+                tree.insert("", "end", values=row)
+
+# Main GUI
+root = tk.Tk()
+root.title("Water Quality Monitoring System")
+root.geometry("600x550")
+
+# Background Image
+bg_image = Image.open(r"C:\\Users\\Suraj Nair\\Desktop\\UNI\\hydrothon.jpeg")
+bg_image = bg_image.resize((600, 550), Image.Resampling.LANCZOS)
+bg_photo = ImageTk.PhotoImage(bg_image)
+
+canvas = tk.Canvas(root, width=600, height=550)
+canvas.pack(fill="both", expand=True)
+canvas.create_image(0, 0, image=bg_photo, anchor="nw")
+
+frame = tk.Frame(root, bg="lightblue", bd=3)
+frame.place(relx=0.5, rely=0.5, anchor="center")
+
+# Sensor Dropdown
+sensor_var = tk.StringVar()
+sensor_list = ["pH", "Turbidity", "Conductivity", "Dissolved Oxygen", "TDS", "COD", "BOD", "Heavy Metals", "Oil Contamination"]
+sensor_dropdown = ttk.Combobox(frame, textvariable=sensor_var, values=sensor_list, state="readonly")
+sensor_dropdown.pack(pady=5)
+sensor_dropdown.current(0)
+
+# Sensor and Prediction Display
+sensor_value = tk.StringVar(value="Select a Sensor")
+tk.Label(frame, textvariable=sensor_value, font=("Arial", 12), bg="lightblue").pack(pady=5)
+
+prediction_value = tk.StringVar(value="Predicted: N/A")
+tk.Label(frame, textvariable=prediction_value, font=("Arial", 12), bg="lightblue", fg="blue").pack(pady=5)
+
+# GPS Coordinates Display
+lat = tk.DoubleVar(value=0.0)
+lon = tk.DoubleVar(value=0.0)
+tk.Label(frame, text="Location:", font=("Arial", 10), bg="lightblue").pack()
+gps_label = tk.Label(frame, text="Lat: 0.0, Lon: 0.0", font=("Arial", 10), bg="lightblue")
+gps_label.pack()
+
+# Map and History Buttons
+tk.Button(frame, text="View on Map", command=open_map, font=("Arial", 10)).pack(pady=5)
+tk.Button(frame, text="Show 7-Day Data", command=show_history, font=("Arial", 10)).pack(pady=5)
+
+# Start Updating
+update_display()
+root.mainloop()
